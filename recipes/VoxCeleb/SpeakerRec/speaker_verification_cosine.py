@@ -41,9 +41,6 @@ def compute_embedding(wavs, wav_lens):
         feats = params["compute_features"](wavs)
         feats = params["mean_var_norm"](feats, wav_lens)
         embeddings = params["embedding_model"](feats, wav_lens)
-        embeddings = params["mean_var_norm_emb"](
-            embeddings, torch.ones(embeddings.shape[0]).to(embeddings.device)
-        )
     return embeddings.squeeze(1)
 
 
@@ -55,7 +52,7 @@ def compute_embedding_loop(data_loader):
 
     with torch.no_grad():
         for batch in tqdm(data_loader, dynamic_ncols=True):
-            batch = batch.to(params["device"])
+            batch = batch.to(run_opts["device"])
             seg_ids = batch.id
             wavs, lens = batch.sig
 
@@ -65,7 +62,10 @@ def compute_embedding_loop(data_loader):
                     found = True
             if not found:
                 continue
-            wavs, lens = wavs.to(params["device"]), lens.to(params["device"])
+            wavs, lens = (
+                wavs.to(run_opts["device"]),
+                lens.to(run_opts["device"]),
+            )
             emb = compute_embedding(wavs, lens).unsqueeze(1)
             for i, seg_id in enumerate(seg_ids):
                 embedding_dict[seg_id] = emb[i].detach().clone()
@@ -73,8 +73,7 @@ def compute_embedding_loop(data_loader):
 
 
 def get_verification_scores(veri_test):
-    """ Computes positive and negative scores given the verification split.
-    """
+    """Computes positive and negative scores given the verification split."""
     scores = []
     positive_scores = []
     negative_scores = []
@@ -155,8 +154,6 @@ def dataio_prep(params):
 
     data_folder = params["data_folder"]
 
-    # 1. Declarations:
-
     # Train data (used for normalization)
     train_data = sb.dataio.dataset.DynamicItemDataset.from_csv(
         csv_path=params["train_data"], replacements={"data_root": data_folder},
@@ -179,7 +176,7 @@ def dataio_prep(params):
 
     datasets = [train_data, enrol_data, test_data]
 
-    # 2. Define audio pipeline:
+    # Define audio pipeline
     @sb.utils.data_pipeline.takes("wav", "start", "stop")
     @sb.utils.data_pipeline.provides("sig")
     def audio_pipeline(wav, start, stop):
@@ -194,10 +191,10 @@ def dataio_prep(params):
 
     sb.dataio.dataset.add_dynamic_item(datasets, audio_pipeline)
 
-    # 3. Set output:
+    # Set output
     sb.dataio.dataset.set_output_keys(datasets, ["id", "sig"])
 
-    # 4 Create dataloaders
+    # Create dataloaders
     train_dataloader = sb.dataio.dataloader.make_dataloader(
         train_data, **params["train_dataloader_opts"]
     )
@@ -243,8 +240,9 @@ if __name__ == "__main__":
         save_folder=params["save_folder"],
         verification_pairs_file=veri_file_path,
         splits=["train", "dev", "test"],
-        split_ratio=[90, 10],
+        split_ratio=params["split_ratio"],
         seg_dur=3.0,
+        skip_prep=params["skip_prep"],
         source=params["voxceleb_source"]
         if "voxceleb_source" in params
         else None,
@@ -256,18 +254,14 @@ if __name__ == "__main__":
     # We download the pretrained LM from HuggingFace (or elsewhere depending on
     # the path given in the YAML file). The tokenizer is loaded at the same time.
     run_on_main(params["pretrainer"].collect_files)
-    params["pretrainer"].load_collected(params["device"])
+    params["pretrainer"].load_collected(run_opts["device"])
     params["embedding_model"].eval()
-    params["embedding_model"].to(params["device"])
+    params["embedding_model"].to(run_opts["device"])
 
     # Computing  enrollment and test embeddings
     logger.info("Computing enroll/test embeddings...")
 
     # First run
-    enrol_dict = compute_embedding_loop(enrol_dataloader)
-    test_dict = compute_embedding_loop(test_dataloader)
-
-    # Second run (normalization stats are more stable)
     enrol_dict = compute_embedding_loop(enrol_dataloader)
     test_dict = compute_embedding_loop(test_dataloader)
 
